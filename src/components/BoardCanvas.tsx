@@ -248,7 +248,6 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
 
   const drawShape = (ctx: CanvasRenderingContext2D, el: ShapeElement) => {
     ctx.strokeStyle = el.color
-    ctx.fillStyle = el.color + "1f" // ~12% alpha fill
     ctx.lineWidth = el.strokeWidth
     ctx.beginPath()
     if (el.type === "rect") {
@@ -256,7 +255,6 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     } else {
       ctx.ellipse(el.x + el.w / 2, el.y + el.h / 2, Math.abs(el.w / 2), Math.abs(el.h / 2), 0, 0, Math.PI * 2)
     }
-    ctx.fill()
     ctx.stroke()
   }
 

@@ -25,6 +25,7 @@ export function elementBBox(el: BoardElement): BBox {
     }
     case "rect":
     case "ellipse":
+    case "postit":
       return { x: Math.min(el.x, el.x + el.w), y: Math.min(el.y, el.y + el.h), w: Math.abs(el.w), h: Math.abs(el.h) }
     case "line":
     case "arrow": {
@@ -98,6 +99,8 @@ export function hitTest(el: BoardElement, pt: Point, tol: number): boolean {
     case "arrow":
       return distToSegment(pt.x, pt.y, el.x1, el.y1, el.x2, el.y2) <= tol + el.strokeWidth / 2
     case "image":
+    case "postit":
+      // Filled surfaces hit anywhere on their area, not just the outline.
       return pt.x >= el.x - tol && pt.x <= el.x + el.w + tol && pt.y >= el.y - tol && pt.y <= el.y + el.h + tol
   }
 }
@@ -116,6 +119,7 @@ export function scaleElement<T extends BoardElement>(el: T, ax: number, ay: numb
       return { ...el, points: el.points.map((p) => ({ x: tx(p.x), y: ty(p.y), p: p.p })) }
     case "rect":
     case "ellipse":
+    case "postit":
       return { ...el, x: tx(el.x), y: ty(el.y), w: el.w * sx, h: el.h * sy }
     case "line":
     case "arrow":
@@ -132,6 +136,7 @@ export function translateElement<T extends BoardElement>(el: T, dx: number, dy: 
     case "rect":
     case "ellipse":
     case "image":
+    case "postit":
       return { ...el, x: el.x + dx, y: el.y + dy }
     case "line":
     case "arrow":

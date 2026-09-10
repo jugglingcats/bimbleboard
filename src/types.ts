@@ -6,6 +6,7 @@ export type Tool =
   | "ellipse"
   | "line"
   | "arrow"
+  | "postit"
 
 export interface Point {
   x: number
@@ -23,6 +24,8 @@ export interface PathElement {
   points: StrokePoint[]
   color: string
   strokeWidth: number
+  /** Containing element, when fully inside one. */
+  containerId?: string
 }
 
 export interface ShapeElement {
@@ -34,6 +37,7 @@ export interface ShapeElement {
   h: number
   color: string
   strokeWidth: number
+  containerId?: string
 }
 
 export interface LineElement {
@@ -45,6 +49,7 @@ export interface LineElement {
   y2: number
   color: string
   strokeWidth: number
+  containerId?: string
 }
 
 export interface ImageElement {
@@ -55,6 +60,21 @@ export interface ImageElement {
   w: number
   h: number
   src: string
+  containerId?: string
+}
+
+export interface PostitElement {
+  id: string
+  type: "postit"
+  x: number
+  y: number
+  w: number
+  h: number
+  text: string
+  align: "left" | "center" | "right"
+  fontSize: number
+  /** Never set — containers cannot be contained (single-level hierarchy). */
+  containerId?: string
 }
 
 export type BoardElement =
@@ -62,6 +82,7 @@ export type BoardElement =
   | ShapeElement
   | LineElement
   | ImageElement
+  | PostitElement
 
 export interface Camera {
   x: number

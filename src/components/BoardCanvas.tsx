@@ -4,6 +4,7 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react"
 import {
@@ -15,7 +16,23 @@ import {
   translateElement,
   type BBox,
 } from "@/lib/geometry"
-import type { BoardElement, Camera, ImageElement, LineElement, PathElement, ShapeElement, Tool } from "@/types"
+import {
+  idsToMoveWith,
+  recontainAfterDrag,
+  renderOrder,
+  withContainment,
+  withoutElements,
+} from "@/lib/containers"
+import type {
+  BoardElement,
+  Camera,
+  ImageElement,
+  LineElement,
+  PathElement,
+  PostitElement,
+  ShapeElement,
+  Tool,
+} from "@/types"
 import { newId } from "@/lib/db"
 import { sampleStroke, StrokeSmoother, type StrokeSample } from "@/lib/smoothing"
 
@@ -43,6 +60,14 @@ export interface CanvasHandle {
   viewportCenter: () => { x: number; y: number }
 }
 
+// Post-it visuals shared with the editor's text-editing overlay.
+export const POSTIT_FILL = "#fde68a"
+export const POSTIT_BORDER = "#f59e0b"
+export const POSTIT_TEXT = "#78350f"
+export const POSTIT_FONT = 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif'
+export const POSTIT_PADDING = 10 // world units
+export const POSTIT_DEFAULT_FONT_SIZE = 20
+
 interface Props {
   elements: BoardElement[]
   tool: Tool
@@ -54,6 +79,7 @@ interface Props {
   onCommit: (updater: (els: BoardElement[]) => BoardElement[], opts?: { history?: boolean }) => void
   onBeginAction: () => void
   onCameraChange: (camera: Camera) => void
+  onEditElement: (id: string) => void
 }
 
 type Mode = "idle" | "pan" | "draw" | "shape" | "marquee" | "move" | "resize" | "erase"
@@ -75,6 +101,37 @@ function strokeRun(ctx: CanvasRenderingContext2D, samples: StrokeSample[], from:
   ctx.moveTo(samples[from].x, samples[from].y)
   for (let i = from + 1; i <= to; i++) ctx.lineTo(samples[i].x, samples[i].y)
   ctx.stroke()
+}
+
+// Word-wrap cache — elements are immutable, so identity is a safe key.
+const wrapCache = new WeakMap<PostitElement, string[]>()
+
+/** Wrapped text lines for a post-it. `ctx.font` must be set; the result is
+ * cached per element object. */
+function postitLines(ctx: CanvasRenderingContext2D, el: PostitElement): string[] {
+  const cached = wrapCache.get(el)
+  if (cached) return cached
+  const maxWidth = Math.max(0, el.w - POSTIT_PADDING * 2)
+  const lines: string[] = []
+  for (const paragraph of el.text.split("\n")) {
+    if (paragraph === "") {
+      lines.push("")
+      continue
+    }
+    let current = ""
+    for (const word of paragraph.split(" ")) {
+      const next = current ? `${current} ${word}` : word
+      if (!current || ctx.measureText(next).width <= maxWidth) {
+        current = next
+      } else {
+        lines.push(current)
+        current = word
+      }
+    }
+    lines.push(current)
+  }
+  wrapCache.set(el, lines)
+  return lines
 }
 
 function selectionBox(elements: BoardElement[], ids: Set<string>): BBox | null {
@@ -106,6 +163,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     onCommit,
     onBeginAction,
     onCameraChange,
+    onEditElement,
   } = props
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -125,6 +183,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
   const liveElementRef = useRef<BoardElement | null>(null)
   const marqueeRef = useRef<BBox | null>(null)
   const moveSnapshotRef = useRef<BoardElement[]>([])
+  const moveIdsRef = useRef<Set<string>>(new Set())
   const moveStartedRef = useRef(false)
   const resizeRef = useRef<ResizeState | null>(null)
   const resizeStartedRef = useRef(false)
@@ -258,6 +317,39 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     ctx.stroke()
   }
 
+  const drawPostit = (ctx: CanvasRenderingContext2D, el: PostitElement) => {
+    // save/restore is mandatory: the text clip below must not leak onto
+    // elements drawn after this one.
+    ctx.save()
+    const path = () => {
+      ctx.beginPath()
+      if (typeof ctx.roundRect === "function") ctx.roundRect(el.x, el.y, el.w, el.h, 6)
+      else ctx.rect(el.x, el.y, el.w, el.h)
+    }
+    path()
+    ctx.fillStyle = POSTIT_FILL
+    ctx.fill()
+    ctx.strokeStyle = POSTIT_BORDER
+    ctx.lineWidth = 1
+    ctx.stroke()
+    if (el.text) {
+      path()
+      ctx.clip()
+      ctx.fillStyle = POSTIT_TEXT
+      ctx.font = `${el.fontSize}px ${POSTIT_FONT}`
+      ctx.textBaseline = "top"
+      ctx.textAlign = el.align
+      const textX = el.align === "left" ? el.x + POSTIT_PADDING : el.align === "right" ? el.x + el.w - POSTIT_PADDING : el.x + el.w / 2
+      const lineHeight = el.fontSize * 1.3
+      let y = el.y + POSTIT_PADDING
+      for (const line of postitLines(ctx, el)) {
+        ctx.fillText(line, textX, y)
+        y += lineHeight
+      }
+    }
+    ctx.restore()
+  }
+
   const drawLine = (ctx: CanvasRenderingContext2D, el: LineElement) => {
     ctx.strokeStyle = el.color
     ctx.lineWidth = el.strokeWidth
@@ -302,6 +394,8 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       case "rect":
       case "ellipse":
         return drawShape(ctx, el)
+      case "postit":
+        return drawPostit(ctx, el)
       case "line":
       case "arrow":
         return drawLine(ctx, el)
@@ -354,7 +448,8 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       y1: (h - cam.y) / cam.zoom,
     }
 
-    const all = [...elementsRef.current]
+    // Children always render just above their container (see renderOrder).
+    const all = renderOrder(elementsRef.current)
     if (liveElementRef.current) all.push(liveElementRef.current)
     for (const el of all) {
       const b = elementBBox(el)
@@ -483,7 +578,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       if (!orig) return el
       const scaled = scaleElement(orig, ax, ay, sx, sy)
       // Scale stroke width for strokes/shapes so they stay proportional.
-      if (scaled.type !== "image") {
+      if (scaled.type !== "image" && scaled.type !== "postit") {
         const f = Math.sqrt(Math.abs(sx * sy))
         return { ...scaled, strokeWidth: Math.max(0.5, (scaled as PathElement).strokeWidth * f) } as BoardElement
       }
@@ -503,8 +598,11 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
 
   const topElementAt = (worldX: number, worldY: number): BoardElement | null => {
     const tol = 8 / cameraRef.current.zoom
-    for (let i = elementsRef.current.length - 1; i >= 0; i--) {
-      if (hitTest(elementsRef.current[i], { x: worldX, y: worldY }, tol)) return elementsRef.current[i]
+    // Resolve in render order so a click picks the visually topmost element —
+    // children sit above their container regardless of array position.
+    const ordered = renderOrder(elementsRef.current)
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      if (hitTest(ordered[i], { x: worldX, y: worldY }, tol)) return ordered[i]
     }
     return null
   }
@@ -550,18 +648,28 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       }
       case "rect":
       case "ellipse":
+      case "postit":
       case "line":
       case "arrow": {
         const isLine = t === "line" || t === "arrow"
-        liveElementRef.current = {
-          id: newId(),
-          type: isLine ? (t as "line" | "arrow") : (t as "rect" | "ellipse"),
-          ...(isLine
-            ? { x1: world.x, y1: world.y, x2: world.x, y2: world.y }
-            : { x: world.x, y: world.y, w: 0, h: 0 }),
-          color: colorRef.current,
-          strokeWidth: strokeRef.current,
-        } as BoardElement
+        const base = { id: newId(), color: colorRef.current, strokeWidth: strokeRef.current }
+        if (isLine) {
+          liveElementRef.current = { ...base, type: t as "line" | "arrow", x1: world.x, y1: world.y, x2: world.x, y2: world.y }
+        } else if (t === "postit") {
+          liveElementRef.current = {
+            ...base,
+            type: "postit",
+            x: world.x,
+            y: world.y,
+            w: 0,
+            h: 0,
+            text: "",
+            align: "left",
+            fontSize: POSTIT_DEFAULT_FONT_SIZE,
+          }
+        } else {
+          liveElementRef.current = { ...base, type: t as "rect" | "ellipse", x: world.x, y: world.y, w: 0, h: 0 }
+        }
         modeRef.current = "shape"
         invalidate()
         break
@@ -601,7 +709,12 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
           }
           onSelectionChange(nextSel)
           selectedRef.current = nextSel
-          moveSnapshotRef.current = elementsRef.current.filter((el) => nextSel.has(el.id)).map((el) => ({ ...el }))
+          // Snapshot everything that will move — the selection plus children of
+          // selected containers — so the whole group translates from its
+          // gesture-start state.
+          const moveIds = idsToMoveWith(nextSel, elementsRef.current)
+          moveIdsRef.current = moveIds
+          moveSnapshotRef.current = elementsRef.current.map((el) => (moveIds.has(el.id) ? { ...el } : el))
           moveStartedRef.current = false
           modeRef.current = "move"
         } else {
@@ -616,6 +729,13 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     }
   }
 
+  const onDoubleClick = (e: ReactMouseEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current!.getBoundingClientRect()
+    const world = toWorld(e.clientX - rect.left, e.clientY - rect.top)
+    const hit = topElementAt(world.x, world.y)
+    if (hit && hit.type === "postit") onEditElement(hit.id)
+  }
+
   const eraseAt = (world: { x: number; y: number }) => {
     const tol = 10 / cameraRef.current.zoom
     const hitIds = new Set<string>()
@@ -628,7 +748,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
         onBeginAction()
         eraseDoneRef.current = true
       }
-      onElementsChange(elementsRef.current.filter((el) => !hitIds.has(el.id)))
+      onElementsChange(withoutElements(elementsRef.current, hitIds))
     }
   }
 
@@ -674,7 +794,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       }
       case "shape": {
         const live = liveElementRef.current
-        if (live && (live.type === "rect" || live.type === "ellipse")) {
+        if (live && (live.type === "rect" || live.type === "ellipse" || live.type === "postit")) {
           if (e.shiftKey) {
             // Shift: square
             const s = Math.max(Math.abs(world.x - start.x), Math.abs(world.y - start.y))
@@ -718,10 +838,11 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
         // Translate the gesture-start snapshot, not the live elements —
         // elementsRef.current already carries earlier deltas from this drag,
         // so translating it again would compound the movement.
+        const moveIds = moveIdsRef.current
         const snapMap = new Map(moveSnapshotRef.current.map((el) => [el.id, el]))
         onElementsChange(
           elementsRef.current.map((el) => {
-            const orig = snapMap.get(el.id)
+            const orig = moveIds.has(el.id) ? snapMap.get(el.id) : undefined
             return orig ? translateElement(orig, dx, dy) : el
           }),
         )
@@ -772,7 +893,8 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
           const tooSmall = b.w < 2 && b.h < 2 && live.type !== "path"
           const emptyPath = live.type === "path" && live.points.length < 2
           if (!tooSmall && !emptyPath) {
-            onCommit((els) => [...els, live])
+            // Freshly created objects become contained when fully inside one.
+            onCommit((els) => [...els, withContainment(els, live)])
           }
         }
         invalidate()
@@ -800,7 +922,18 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       case "erase": {
         break
       }
-      case "move":
+      case "move": {
+        // Re-evaluate containment once at release, folded into the same
+        // gesture's history entry (taken at drag start via onBeginAction).
+        if (moveStartedRef.current && moveIdsRef.current.size > 0) {
+          const moveIds = moveIdsRef.current
+          const next = elementsRef.current.map((el) =>
+            moveIds.has(el.id) ? recontainAfterDrag(elementsRef.current, el) : el,
+          )
+          if (next.some((el, i) => el !== elementsRef.current[i])) onElementsChange(next)
+        }
+        break
+      }
       case "resize": {
         // history was taken at gesture start via onBeginAction
         break
@@ -914,6 +1047,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onDoubleClick={onDoubleClick}
         onContextMenu={(e) => e.preventDefault()}
       />
     </div>

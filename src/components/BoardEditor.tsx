@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   ArrowLeft,
   BringToFront,
   Eraser,
@@ -12,15 +15,26 @@ import {
   Redo2,
   SendToBack,
   Square,
+  StickyNote,
   Trash2,
   Undo2,
   Circle,
   Slash,
   MoveUpRight,
 } from "lucide-react"
-import BoardCanvas, { MAX_ZOOM, MIN_ZOOM, PALETTE, type CanvasHandle } from "@/components/BoardCanvas"
+import BoardCanvas, {
+  MAX_ZOOM,
+  MIN_ZOOM,
+  PALETTE,
+  POSTIT_FILL,
+  POSTIT_FONT,
+  POSTIT_PADDING,
+  POSTIT_TEXT,
+  type CanvasHandle,
+} from "@/components/BoardCanvas"
 import { Button } from "@/components/ui/button"
 import { reorderElements, type ReorderAction } from "@/lib/geometry"
+import { withContainment, withoutElements } from "@/lib/containers"
 import { Separator } from "@/components/ui/separator"
 import {
   Tooltip,
@@ -31,7 +45,7 @@ import {
 import { Slider } from "@/components/ui/slider"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { navigate } from "@/lib/router"
-import type { BoardElement, Camera, ImageElement, Tool } from "@/types"
+import type { BoardElement, Camera, ImageElement, PostitElement, Tool } from "@/types"
 import { newId } from "@/lib/db"
 import type { BoardState } from "@/hooks/useBoard"
 
@@ -43,9 +57,22 @@ const TOOLS: { id: Tool; label: string; icon: typeof Pencil; shortcut: string }[
   { id: "ellipse", label: "Ellipse", icon: Circle, shortcut: "O" },
   { id: "line", label: "Line", icon: Slash, shortcut: "L" },
   { id: "arrow", label: "Arrow", icon: MoveUpRight, shortcut: "A" },
+  { id: "postit", label: "Post-it", icon: StickyNote, shortcut: "N" },
 ]
 
 const STROKE_WIDTHS = [2, 4, 8, 14]
+
+const POSTIT_ALIGNMENTS = [
+  { align: "left", icon: AlignLeft },
+  { align: "center", icon: AlignCenter },
+  { align: "right", icon: AlignRight },
+] as const
+
+const POSTIT_FONT_SIZES = [
+  { label: "S", size: 14 },
+  { label: "M", size: 20 },
+  { label: "L", size: 28 },
+]
 
 interface Props {
   state: BoardState
@@ -58,7 +85,12 @@ export default function BoardEditor({ state }: Props) {
   const [color, setColor] = useState("#1e1e1e")
   const [strokeWidth, setStrokeWidth] = useState(4)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const [zoom, setZoom] = useState(1)
+  // Full camera state so HTML overlays (post-it menu, text editor) can track
+  // the canvas transform.
+  const [camera, setCameraState] = useState<Camera>({ x: 0, y: 0, zoom: 1 })
+  const zoom = camera.zoom
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [draft, setDraft] = useState("")
   const [nameDialogOpen, setNameDialogOpen] = useState(false)
   const [nameDraft, setNameDraft] = useState("")
 
@@ -70,7 +102,7 @@ export default function BoardEditor({ state }: Props) {
 
   const onCameraChange = useCallback(
     (cam: Camera) => {
-      setZoom(cam.zoom)
+      setCameraState(cam)
       setCamera(cam)
     },
     [setCamera],
@@ -81,7 +113,8 @@ export default function BoardEditor({ state }: Props) {
   const deleteSelected = useCallback(() => {
     if (selectedRef.current.size === 0) return
     const ids = selectedRef.current
-    commit((els) => els.filter((el) => !ids.has(el.id)))
+    // Children of a deleted container stay, detached.
+    commit((els) => withoutElements(els, ids))
     setSelectedIds(new Set())
   }, [commit])
 
@@ -100,7 +133,7 @@ export default function BoardEditor({ state }: Props) {
     if (board && canvasRef.current && !appliedCameraRef.current) {
       appliedCameraRef.current = true
       canvasRef.current.setCameraAbsolute(board.camera)
-      setZoom(board.camera.zoom)
+      setCameraState(board.camera)
     }
   }, [board])
 
@@ -127,7 +160,7 @@ export default function BoardEditor({ state }: Props) {
             h,
             src,
           }
-          commit((els) => [...els, el])
+          commit((els) => [...els, withContainment(els, el)])
           setTool("select")
           setSelectedIds(new Set([el.id]))
         }
@@ -243,6 +276,22 @@ export default function BoardEditor({ state }: Props) {
   if (!board) return null
 
   const activeColorIndex = PALETTE.indexOf(color)
+  const selectedElement = selectedIds.size === 1 ? board.elements.find((e) => e.id === [...selectedIds][0]) : undefined
+  const postitMenu = selectedElement?.type === "postit" ? selectedElement : undefined
+  const editingTarget = editingId ? board.elements.find((e) => e.id === editingId) : undefined
+  const editingPostit = editingTarget?.type === "postit" ? editingTarget : undefined
+
+  const setPostit = (id: string, patch: Partial<PostitElement>) =>
+    commit((els) => els.map((e) => (e.type === "postit" && e.id === id ? { ...e, ...patch } : e)))
+
+  const commitDraft = () => {
+    if (!editingPostit || !editingId) return
+    if (editingPostit.text !== draft) {
+      const id = editingId
+      commit((els) => els.map((e) => (e.type === "postit" && e.id === id ? { ...e, text: draft } : e)))
+    }
+    setEditingId(null)
+  }
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -259,7 +308,83 @@ export default function BoardEditor({ state }: Props) {
           onCommit={commit}
           onBeginAction={beginAction}
           onCameraChange={onCameraChange}
+          onEditElement={(id) => {
+            const el = board.elements.find((e) => e.id === id)
+            if (el?.type !== "postit") return
+            setSelectedIds(new Set([id]))
+            setDraft(el.text)
+            setEditingId(id)
+          }}
         />
+
+        {/* Post-it menu — floats outside the top-right corner of the note */}
+        {postitMenu && !editingPostit && (
+          <div
+            className="absolute z-20 flex -translate-y-full items-center gap-1 rounded-lg border border-neutral-200 bg-white/95 p-1 shadow-lg backdrop-blur"
+            style={{
+              left: Math.min((postitMenu.x + postitMenu.w) * camera.zoom + camera.x + 6, window.innerWidth - 230),
+              top: Math.max(postitMenu.y * camera.zoom + camera.y - 6, 44),
+            }}
+          >
+            {POSTIT_ALIGNMENTS.map(({ align, icon: Icon }) => (
+              <Button
+                key={align}
+                variant="ghost"
+                size="icon-sm"
+                className={postitMenu.align === align ? "bg-neutral-100" : ""}
+                onClick={() => setPostit(postitMenu.id, { align })}
+                title={`Align text ${align}`}
+              >
+                <Icon className="h-4 w-4" />
+              </Button>
+            ))}
+            <Separator orientation="vertical" className="!h-5" />
+            {POSTIT_FONT_SIZES.map(({ label, size }) => (
+              <button
+                key={label}
+                className={`h-7 w-7 rounded-md text-xs font-medium ${
+                  postitMenu.fontSize === size ? "bg-neutral-900 text-white" : "hover:bg-neutral-100"
+                }`}
+                onClick={() => setPostit(postitMenu.id, { fontSize: size })}
+                title={`Text size ${label}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Post-it text editor — opaque so it covers the canvas-rendered text */}
+        {editingPostit && (
+          <textarea
+            autoFocus
+            className="absolute z-20 overflow-hidden rounded-md outline-2 outline-blue-500"
+            style={{
+              left: editingPostit.x * camera.zoom + camera.x,
+              top: editingPostit.y * camera.zoom + camera.y,
+              width: editingPostit.w * camera.zoom,
+              height: editingPostit.h * camera.zoom,
+              fontSize: editingPostit.fontSize * camera.zoom,
+              lineHeight: 1.3,
+              textAlign: editingPostit.align,
+              padding: POSTIT_PADDING * camera.zoom,
+              backgroundColor: POSTIT_FILL,
+              color: POSTIT_TEXT,
+              fontFamily: POSTIT_FONT,
+              border: "none",
+              resize: "none",
+            }}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commitDraft}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault()
+                commitDraft()
+              }
+            }}
+          />
+        )}
 
         {/* Top bar */}
         <div className="absolute inset-x-0 top-0 z-10 flex items-center gap-2 border-b border-neutral-200 bg-white/90 px-3 py-2 backdrop-blur">

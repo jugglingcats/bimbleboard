@@ -1,32 +1,86 @@
-# React + TypeScript + Vite
+# Bimbleboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Bimbleboard is an infinite-canvas whiteboard desktop app for sketching ideas,
+diagramming, and freeform note-taking. It's built with [Tauri](https://tauri.app/),
+[React](https://react.dev/), and TypeScript, and runs as a lightweight native
+application on Windows, macOS, and Linux.
 
-Currently, two official plugins are available:
+Boards are stored locally as plain JSON files, so your work stays on your machine
+and survives browser/webview storage clears.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- **Infinite canvas** with smooth pan and zoom.
+- **Drawing tools:** freehand pen (pressure-aware), rectangle, ellipse, line, and arrow.
+- **Post-it notes** with editable text, alignment, and adjustable font sizes.
+- **Images:** paste from the clipboard or drag-and-drop onto the canvas.
+- **Containers:** drop elements inside shapes/notes and move them together.
+- **Selection, move, resize, and z-ordering** of elements.
+- **Undo/redo** history.
+- **Multiple boards** with autosave.
+- **Local-first storage:** one JSON file per board under the app data directory
+  (IndexedDB is used when running as a plain web app).
+- **Keyboard shortcuts** for every tool.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Tech stack
 
-## Expanding the Oxlint configuration
+- **UI:** React 19 + TypeScript, rendered to an HTML canvas.
+- **Styling:** Tailwind CSS and Radix UI primitives.
+- **Desktop shell:** Tauri 2 (Rust).
+- **Build tooling:** Vite, pnpm, Oxlint.
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## Getting started
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) 20+
+- [pnpm](https://pnpm.io/) 9+
+- [Rust](https://www.rust-lang.org/tools/install) (stable) and the
+  [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform.
+
+### Install
+
+```bash
+pnpm install
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+### Develop
+
+Run the desktop app in development mode with hot reload:
+
+```bash
+pnpm tauri:dev
+```
+
+Or run just the web frontend:
+
+```bash
+pnpm dev
+```
+
+### Build
+
+Produce a production desktop bundle and installer for your platform:
+
+```bash
+pnpm tauri:build
+```
+
+Installers and executables are written to `src-tauri/target/release/bundle/`.
+
+## Releases
+
+Tagged releases are built automatically by GitHub Actions. Pushing a tag of the
+form `vX.Y.Z` builds the app for Windows, macOS, and Linux and publishes the
+installers to a GitHub Release:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The app version is derived from the git tag at build time.
+
+## License
+
+Released under the [MIT License](LICENSE.md).

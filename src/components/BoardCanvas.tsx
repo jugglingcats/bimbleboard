@@ -17,6 +17,7 @@ import {
 } from "@/lib/geometry"
 import type { BoardElement, Camera, ImageElement, LineElement, PathElement, ShapeElement, Tool } from "@/types"
 import { newId } from "@/lib/db"
+import { sampleStroke, StrokeSmoother, type StrokeSample } from "@/lib/smoothing"
 
 export const MIN_ZOOM = 0.05
 export const MAX_ZOOM = 20
@@ -66,6 +67,15 @@ interface ResizeState {
 
 const HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const
 const HANDLE_SIZE = 9
+
+/** Stroke one polyline of spline samples at a constant width. */
+function strokeRun(ctx: CanvasRenderingContext2D, samples: StrokeSample[], from: number, to: number, w: number) {
+  ctx.lineWidth = w
+  ctx.beginPath()
+  ctx.moveTo(samples[from].x, samples[from].y)
+  for (let i = from + 1; i <= to; i++) ctx.lineTo(samples[i].x, samples[i].y)
+  ctx.stroke()
+}
 
 function selectionBox(elements: BoardElement[], ids: Set<string>): BBox | null {
   const sel = elements.filter((e) => ids.has(e.id))
@@ -119,6 +129,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
   const resizeRef = useRef<ResizeState | null>(null)
   const resizeStartedRef = useRef(false)
   const eraseDoneRef = useRef(false)
+  const strokeSmootherRef = useRef<StrokeSmoother | null>(null)
 
   // Keep latest props in refs for event handlers
   const elementsRef = useRef(elements)
@@ -204,37 +215,35 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
   // ---------- Drawing ----------
 
   const drawPath = (ctx: CanvasRenderingContext2D, el: PathElement) => {
-    if (el.points.length === 0) return
+    const pts = el.points
+    if (pts.length === 0) return
     ctx.strokeStyle = el.color
+    ctx.fillStyle = el.color
     ctx.lineCap = "round"
     ctx.lineJoin = "round"
-    if (el.points.length === 1) {
-      const p = el.points[0]
-      ctx.fillStyle = el.color
+    if (pts.length === 1) {
+      const p = pts[0]
       ctx.beginPath()
       ctx.arc(p.x, p.y, (el.strokeWidth * (0.5 + p.p)) / 2, 0, Math.PI * 2)
       ctx.fill()
       return
     }
-    ctx.beginPath()
-    const first = el.points[0]
-    ctx.moveTo(first.x, first.y)
-    for (let i = 1; i < el.points.length; i++) {
-      const p = el.points[i]
-      const prev = el.points[i - 1]
-      // Variable-width stroke: draw each segment with its own pressure-derived width.
-      const width = el.strokeWidth * (0.5 + (prev.p + p.p) / 2 * 0.9)
-      ctx.lineWidth = width
-      ctx.beginPath()
-      ctx.moveTo(prev.x, prev.y)
-      const mid = { x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2 }
-      ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y)
-      ctx.stroke()
-      ctx.beginPath()
-      ctx.moveTo(mid.x, mid.y)
-      ctx.lineTo(p.x, p.y)
-      ctx.stroke()
+    const zoom = cameraRef.current.zoom
+    const samples = sampleStroke(pts, el.strokeWidth, zoom)
+    // Batch consecutive samples of near-identical width (≤ half a screen px
+    // apart) into one polyline — constant-pressure strokes then stroke as a
+    // single path instead of one draw call per sample.
+    const eps = 0.5 / zoom
+    let start = 0
+    let runW = samples[0].w
+    for (let i = 1; i < samples.length; i++) {
+      if (Math.abs(samples[i].w - runW) > eps) {
+        strokeRun(ctx, samples, start, i, runW)
+        start = i - 1 // overlap one sample so the runs join seamlessly
+        runW = samples[i].w
+      }
     }
+    strokeRun(ctx, samples, start, samples.length - 1, runW)
   }
 
   const drawShape = (ctx: CanvasRenderingContext2D, el: ShapeElement) => {
@@ -520,10 +529,12 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     switch (t) {
       case "pen": {
         const pressure = e.pointerType === "pen" ? e.pressure : 0.5
+        strokeSmootherRef.current = new StrokeSmoother()
+        const smooth = strokeSmootherRef.current.add(screen.x, screen.y, pressure, e.nativeEvent.timeStamp)
         liveElementRef.current = {
           id: newId(),
           type: "path",
-          points: [{ x: world.x, y: world.y, p: pressure }],
+          points: [{ x: world.x, y: world.y, p: smooth.p }],
           color: colorRef.current,
           strokeWidth: strokeRef.current,
         }
@@ -631,16 +642,26 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       }
       case "draw": {
         const live = liveElementRef.current as PathElement
+        const smoother = strokeSmootherRef.current
+        if (!smoother) break
         // Coalesced events give smooth high-frequency pen input (Chrome).
         const events = (e.nativeEvent as PointerEvent).getCoalescedEvents?.() ?? []
         const samples = events.length > 0 ? events : [e.nativeEvent as PointerEvent]
         const rect = canvasRef.current!.getBoundingClientRect()
+        const cam = cameraRef.current
         for (const ev of samples) {
-          const wx = (ev.clientX - rect.left - cameraRef.current.x) / cameraRef.current.zoom
-          const wy = (ev.clientY - rect.top - cameraRef.current.y) / cameraRef.current.zoom
+          // Filter in screen space (where device jitter lives), then convert.
+          const smooth = smoother.add(
+            ev.clientX - rect.left,
+            ev.clientY - rect.top,
+            ev.pointerType === "pen" ? ev.pressure : 0.5,
+            ev.timeStamp,
+          )
+          const wx = (smooth.x - cam.x) / cam.zoom
+          const wy = (smooth.y - cam.y) / cam.zoom
           const last = live.points[live.points.length - 1]
-          if (last && Math.hypot(wx - last.x, wy - last.y) < 0.75 / cameraRef.current.zoom) continue
-          live.points.push({ x: wx, y: wy, p: ev.pointerType === "pen" ? ev.pressure : 0.5 })
+          if (last && Math.hypot(wx - last.x, wy - last.y) < 0.75 / cam.zoom) continue
+          live.points.push({ x: wx, y: wy, p: smooth.p })
         }
         invalidate()
         break
@@ -724,6 +745,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     modeRef.current = "idle"
     activePointerRef.current = null
     panButtonRef.current = false
+    strokeSmootherRef.current = null
     try {
       canvasRef.current?.releasePointerCapture(e.pointerId)
     } catch {

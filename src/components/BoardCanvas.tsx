@@ -442,7 +442,13 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     return null
   }, [])
 
-  const applyResize = (state: ResizeState, handle: string, worldX: number, worldY: number): BoardElement[] => {
+  const applyResize = (
+    state: ResizeState,
+    handle: string,
+    worldX: number,
+    worldY: number,
+    keepAspect: boolean,
+  ): BoardElement[] => {
     const b = state.startBBox
     const minSize = 2
     // Track the drag delta from where the pointer grabbed the handle —
@@ -450,17 +456,19 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     // screen-space padding. Edges then follow the cursor exactly.
     const dx = worldX - state.startPointer.x
     const dy = worldY - state.startPointer.y
-    let { x, y, w, h } = b
+    let w = b.w
+    let h = b.h
     if (handle.includes("e")) w = Math.max(minSize, b.w + dx)
+    if (handle.includes("w")) w = Math.max(minSize, b.w - dx)
     if (handle.includes("s")) h = Math.max(minSize, b.h + dy)
-    if (handle.includes("w")) {
-      x = Math.min(b.x + b.w - minSize, b.x + dx)
-      w = b.x + b.w - x
+    if (handle.includes("n")) h = Math.max(minSize, b.h - dy)
+    if (keepAspect) {
+      // Follow the dominant axis so the box tracks the leading edge of the cursor.
+      const s = Math.max(w / Math.max(b.w, 1), h / Math.max(b.h, 1))
+      w = Math.max(minSize, b.w * s)
+      h = Math.max(minSize, b.h * s)
     }
-    if (handle.includes("n")) {
-      y = Math.min(b.y + b.h - minSize, b.y + dy)
-      h = b.y + b.h - y
-    }
+    // Anchor edges opposite the dragged handle at their gesture-start position.
     const sx = w / Math.max(b.w, 1)
     const sy = h / Math.max(b.h, 1)
     const ax = handle.includes("w") ? b.x + b.w : b.x
@@ -725,7 +733,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
             onBeginAction()
             resizeStartedRef.current = true
           }
-          onElementsChange(applyResize(resizeRef.current, resizeRef.current.handle, world.x, world.y))
+          onElementsChange(applyResize(resizeRef.current, resizeRef.current.handle, world.x, world.y, e.shiftKey))
         }
         break
       }

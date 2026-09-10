@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   ArrowLeft,
+  BringToFront,
   Eraser,
   Hand,
   Maximize,
@@ -9,6 +10,7 @@ import {
   Pencil,
   Plus,
   Redo2,
+  SendToBack,
   Square,
   Trash2,
   Undo2,
@@ -18,6 +20,7 @@ import {
 } from "lucide-react"
 import BoardCanvas, { MAX_ZOOM, MIN_ZOOM, PALETTE, type CanvasHandle } from "@/components/BoardCanvas"
 import { Button } from "@/components/ui/button"
+import { reorderElements, type ReorderAction } from "@/lib/geometry"
 import { Separator } from "@/components/ui/separator"
 import {
   Tooltip,
@@ -81,6 +84,15 @@ export default function BoardEditor({ state }: Props) {
     commit((els) => els.filter((el) => !ids.has(el.id)))
     setSelectedIds(new Set())
   }, [commit])
+
+  const reorderSelected = useCallback(
+    (action: ReorderAction) => {
+      if (selectedRef.current.size === 0) return
+      const ids = selectedRef.current
+      commit((els) => reorderElements(els, ids, action) ?? els)
+    },
+    [commit],
+  )
 
   // Restore the saved camera once the board is loaded and canvas is mounted.
   const appliedCameraRef = useRef(false)
@@ -189,6 +201,16 @@ export default function BoardEditor({ state }: Props) {
         setSelectedIds(new Set())
         return
       }
+      if (e.key === "]") {
+        e.preventDefault()
+        reorderSelected("forward")
+        return
+      }
+      if (e.key === "[") {
+        e.preventDefault()
+        reorderSelected("backward")
+        return
+      }
       if (mod && (e.key === "=" || e.key === "+")) {
         e.preventDefault()
         canvasRef.current?.zoomBy(1.2)
@@ -216,7 +238,7 @@ export default function BoardEditor({ state }: Props) {
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [undo, redo, deleteSelected])
+  }, [undo, redo, deleteSelected, reorderSelected])
 
   if (!board) return null
 
@@ -262,6 +284,25 @@ export default function BoardEditor({ state }: Props) {
             </Button>
             <Button variant="ghost" size="icon-sm" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">
               <Redo2 className="h-4 w-4" />
+            </Button>
+            <Separator orientation="vertical" className="!h-5" />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => reorderSelected("back")}
+              disabled={selectedIds.size === 0}
+              title="Send to back"
+            >
+              <SendToBack className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => reorderSelected("front")}
+              disabled={selectedIds.size === 0}
+              title="Bring to front"
+            >
+              <BringToFront className="h-4 w-4" />
             </Button>
             <Separator orientation="vertical" className="!h-5" />
             <Button

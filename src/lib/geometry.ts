@@ -138,3 +138,54 @@ export function translateElement<T extends BoardElement>(el: T, dx: number, dy: 
       return { ...el, x1: el.x1 + dx, y1: el.y1 + dy, x2: el.x2 + dx, y2: el.y2 + dy }
   }
 }
+
+export type ReorderAction = "front" | "back" | "forward" | "backward"
+
+/** Reorder selected elements within the stack (later = on top), preserving
+ * their relative order. Returns null when the selection is already at the
+ * requested position, so callers can skip empty history entries. */
+export function reorderElements<T extends BoardElement>(
+  elements: T[],
+  ids: Set<string>,
+  action: ReorderAction,
+): T[] | null {
+  if (ids.size === 0) return null
+  const sel = (el: T) => ids.has(el.id)
+  switch (action) {
+    case "front":
+    case "back": {
+      const picked = elements.filter(sel)
+      const rest = elements.filter((el) => !sel(el))
+      const atEnd = action === "front"
+      const ordered = atEnd ? [...rest, ...picked] : [...picked, ...rest]
+      // No-op when the selection already sits flush at the target edge.
+      const offset = atEnd ? elements.length - picked.length : 0
+      for (let i = 0; i < picked.length; i++) {
+        if (elements[offset + i] !== picked[i]) return ordered
+      }
+      return null
+    }
+    case "forward":
+    case "backward": {
+      const next = [...elements]
+      let changed = false
+      if (action === "forward") {
+        // Iterate away from the top so a selected group moves as a block.
+        for (let i = next.length - 2; i >= 0; i--) {
+          if (sel(next[i]) && !sel(next[i + 1])) {
+            ;[next[i], next[i + 1]] = [next[i + 1], next[i]]
+            changed = true
+          }
+        }
+      } else {
+        for (let i = 1; i < next.length; i++) {
+          if (sel(next[i]) && !sel(next[i - 1])) {
+            ;[next[i], next[i - 1]] = [next[i - 1], next[i]]
+            changed = true
+          }
+        }
+      }
+      return changed ? next : null
+    }
+  }
+}

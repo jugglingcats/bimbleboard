@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   AlignCenter,
   AlignLeft,
@@ -33,7 +33,7 @@ import BoardCanvas, {
   type CanvasHandle,
 } from "@/components/BoardCanvas"
 import { Button } from "@/components/ui/button"
-import { reorderElements, type ReorderAction } from "@/lib/geometry"
+import { elementBBox, reorderElements, type ReorderAction } from "@/lib/geometry"
 import { withContainment, withoutElements } from "@/lib/containers"
 import { Separator } from "@/components/ui/separator"
 import {
@@ -74,6 +74,34 @@ const POSTIT_FONT_SIZES = [
   { label: "L", size: 28 },
 ]
 
+type MenuAction = "back" | "front" | "delete"
+
+const MENU_ACTIONS: { action: MenuAction; label: string; icon: typeof Pencil }[] = [
+  { action: "back", label: "Send to back", icon: SendToBack },
+  { action: "front", label: "Bring to front", icon: BringToFront },
+  { action: "delete", label: "Delete (Del)", icon: Trash2 },
+]
+
+/** Vertical context menu anchored outside an element's top-right corner.
+ * `children` hold type-specific settings (e.g. post-it text controls) shown
+ * above the actions every element gets. */
+function SelectionMenu(props: { left: number; top: number; onAction: (action: MenuAction) => void; children?: ReactNode }) {
+  return (
+    <div
+      className="absolute z-20 flex w-9 flex-col items-center gap-1 rounded-lg border border-neutral-200 bg-white/95 p-1 shadow-lg backdrop-blur"
+      style={{ left: props.left, top: props.top }}
+    >
+      {props.children}
+      {props.children ? <Separator className="w-full" /> : null}
+      {MENU_ACTIONS.map(({ action, label, icon: Icon }) => (
+        <Button key={action} variant="ghost" size="icon-sm" onClick={() => props.onAction(action)} title={label}>
+          <Icon className="h-4 w-4" />
+        </Button>
+      ))}
+    </div>
+  )
+}
+
 interface Props {
   state: BoardState
 }
@@ -99,6 +127,9 @@ export default function BoardEditor({ state }: Props) {
   toolRef.current = tool
   const selectedRef = useRef(selectedIds)
   selectedRef.current = selectedIds
+  // True while a stroke-width slider drag is in progress, so a selection
+  // restyle takes one undo entry for the whole gesture, not one per tick.
+  const strokeGestureRef = useRef(false)
 
   const onCameraChange = useCallback(
     (cam: Camera) => {
@@ -126,6 +157,40 @@ export default function BoardEditor({ state }: Props) {
     },
     [commit],
   )
+
+  // Restyle the current selection; the value also stays the tool default for
+  // whatever is drawn next. Elements without the property (images, post-its)
+  // are left untouched.
+  const applyToSelection = useCallback(
+    (patch: Partial<{ color: string; strokeWidth: number }>, history = true) => {
+      const ids = selectedRef.current
+      if (ids.size === 0) return
+      const mutate = (els: BoardElement[]) => {
+        let changed = false
+        const next = els.map((el) => {
+          if (ids.has(el.id) && "color" in el) {
+            changed = true
+            return { ...el, ...patch }
+          }
+          return el
+        })
+        return changed ? next : els
+      }
+      if (history) commit(mutate)
+      else update(mutate)
+    },
+    [commit, update],
+  )
+
+  const changeColor = (c: string) => {
+    setColor(c)
+    applyToSelection({ color: c })
+  }
+
+  const changeStrokeWidth = (w: number, history = true) => {
+    setStrokeWidth(w)
+    applyToSelection({ strokeWidth: w }, history)
+  }
 
   // Restore the saved camera once the board is loaded and canvas is mounted.
   const appliedCameraRef = useRef(false)
@@ -293,6 +358,11 @@ export default function BoardEditor({ state }: Props) {
     setEditingId(null)
   }
 
+  const menuPos = (box: { x: number; y: number; w: number }) => ({
+    left: Math.min((box.x + box.w) * camera.zoom + camera.x + 8, window.innerWidth - 52),
+    top: box.y * camera.zoom + camera.y - 8,
+  })
+
   return (
     <TooltipProvider delayDuration={300}>
       <div className="relative h-full w-full overflow-hidden bg-neutral-50">
@@ -317,41 +387,45 @@ export default function BoardEditor({ state }: Props) {
           }}
         />
 
-        {/* Post-it menu — floats outside the top-right corner of the note */}
-        {postitMenu && !editingPostit && (
-          <div
-            className="absolute z-20 flex -translate-y-full items-center gap-1 rounded-lg border border-neutral-200 bg-white/95 p-1 shadow-lg backdrop-blur"
-            style={{
-              left: Math.min((postitMenu.x + postitMenu.w) * camera.zoom + camera.x + 6, window.innerWidth - 230),
-              top: Math.max(postitMenu.y * camera.zoom + camera.y - 6, 44),
+        {/* Context menu — floats outside the top-right corner of the selection */}
+        {selectedElement && !editingPostit && (
+          <SelectionMenu
+            {...menuPos(elementBBox(selectedElement))}
+            onAction={(action) => {
+              if (action === "delete") deleteSelected()
+              else reorderSelected(action)
             }}
           >
-            {POSTIT_ALIGNMENTS.map(({ align, icon: Icon }) => (
-              <Button
-                key={align}
-                variant="ghost"
-                size="icon-sm"
-                className={postitMenu.align === align ? "bg-neutral-100" : ""}
-                onClick={() => setPostit(postitMenu.id, { align })}
-                title={`Align text ${align}`}
-              >
-                <Icon className="h-4 w-4" />
-              </Button>
-            ))}
-            <Separator orientation="vertical" className="!h-5" />
-            {POSTIT_FONT_SIZES.map(({ label, size }) => (
-              <button
-                key={label}
-                className={`h-7 w-7 rounded-md text-xs font-medium ${
-                  postitMenu.fontSize === size ? "bg-neutral-900 text-white" : "hover:bg-neutral-100"
-                }`}
-                onClick={() => setPostit(postitMenu.id, { fontSize: size })}
-                title={`Text size ${label}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+            {postitMenu && (
+              <>
+                {POSTIT_ALIGNMENTS.map(({ align, icon: Icon }) => (
+                  <Button
+                    key={align}
+                    variant="ghost"
+                    size="icon-sm"
+                    className={postitMenu.align === align ? "bg-neutral-100" : ""}
+                    onClick={() => setPostit(postitMenu.id, { align })}
+                    title={`Align text ${align}`}
+                  >
+                    <Icon className="h-4 w-4" />
+                  </Button>
+                ))}
+                <Separator className="w-full" />
+                {POSTIT_FONT_SIZES.map(({ label, size }) => (
+                  <button
+                    key={label}
+                    className={`h-7 w-7 rounded-md text-xs font-medium ${
+                      postitMenu.fontSize === size ? "bg-neutral-900 text-white" : "hover:bg-neutral-100"
+                    }`}
+                    onClick={() => setPostit(postitMenu.id, { fontSize: size })}
+                    title={`Text size ${label}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </>
+            )}
+          </SelectionMenu>
         )}
 
         {/* Post-it text editor — opaque so it covers the canvas-rendered text */}
@@ -409,35 +483,6 @@ export default function BoardEditor({ state }: Props) {
             </Button>
             <Button variant="ghost" size="icon-sm" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">
               <Redo2 className="h-4 w-4" />
-            </Button>
-            <Separator orientation="vertical" className="!h-5" />
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => reorderSelected("back")}
-              disabled={selectedIds.size === 0}
-              title="Send to back"
-            >
-              <SendToBack className="h-4 w-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => reorderSelected("front")}
-              disabled={selectedIds.size === 0}
-              title="Bring to front"
-            >
-              <BringToFront className="h-4 w-4" />
-            </Button>
-            <Separator orientation="vertical" className="!h-5" />
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={deleteSelected}
-              disabled={selectedIds.size === 0}
-              title="Delete selected (Del)"
-            >
-              <Trash2 className="h-4 w-4" />
             </Button>
           </div>
         </div>
@@ -513,7 +558,7 @@ export default function BoardEditor({ state }: Props) {
                   }`}
                   style={{ backgroundColor: c }}
                   title={c}
-                  onClick={() => setColor(c)}
+                  onClick={() => changeColor(c)}
                 />
               ))}
               <label
@@ -526,7 +571,7 @@ export default function BoardEditor({ state }: Props) {
                   type="color"
                   className="absolute inset-0 cursor-pointer opacity-0"
                   value={color}
-                  onChange={(e) => setColor(e.target.value)}
+                  onChange={(e) => changeColor(e.target.value)}
                 />
               </label>
             </div>
@@ -553,7 +598,7 @@ export default function BoardEditor({ state }: Props) {
                       className={`flex h-8 flex-1 items-center justify-center rounded-md border ${
                         strokeWidth === w ? "border-neutral-900 bg-neutral-100" : "border-neutral-200 hover:bg-neutral-50"
                       }`}
-                      onClick={() => setStrokeWidth(w)}
+                      onClick={() => changeStrokeWidth(w)}
                     >
                       <span className="rounded-full bg-neutral-800" style={{ width: Math.min(w, 14), height: Math.min(w, 14) }} />
                     </button>
@@ -564,7 +609,18 @@ export default function BoardEditor({ state }: Props) {
                   min={1}
                   max={32}
                   step={1}
-                  onValueChange={([v]) => setStrokeWidth(v)}
+                  onValueChange={([v]) => {
+                    if (!strokeGestureRef.current) {
+                      strokeGestureRef.current = true
+                      // One undo entry for the whole drag, taken before the
+                      // first live change.
+                      if (selectedRef.current.size > 0) beginAction()
+                    }
+                    changeStrokeWidth(v, selectedRef.current.size === 0)
+                  }}
+                  onValueCommit={() => {
+                    strokeGestureRef.current = false
+                  }}
                 />
               </PopoverContent>
             </Popover>

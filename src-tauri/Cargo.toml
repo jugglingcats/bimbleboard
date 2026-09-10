@@ -1,6 +1,6 @@
 [package]
 name = "bimbleboard"
-version = "0.1.0"
+version = "1.0.0"
 description = "Bimbleboard — an infinite local whiteboard"
 authors = ["you"]
 license = ""

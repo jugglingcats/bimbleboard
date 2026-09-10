@@ -1,0 +1,4 @@
+# Tauri's 2026 dependency tree needs edition2024 (Rust 1.85+).
+# Pinned per-project so the machine's default toolchain is untouched.
+[toolchain]
+channel = "1.98.0"

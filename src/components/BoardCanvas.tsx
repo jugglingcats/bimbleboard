@@ -34,7 +34,8 @@ import type {
   Tool,
 } from "@/types"
 import { newId } from "@/lib/db"
-import { sampleStroke, StrokeSmoother, type StrokeSample } from "@/lib/smoothing"
+import { sampleStroke, StrokeSmoother, type SmoothedSample, type StrokeSample } from "@/lib/smoothing"
+import { circleHitsBBox, eraseStroke } from "@/lib/erase"
 
 export const MIN_ZOOM = 0.05
 export const MAX_ZOOM = 20
@@ -90,6 +91,23 @@ interface ResizeState {
   startPointer: { x: number; y: number }
   snapshot: BoardElement[]
 }
+
+/** Straight-line constraint while drawing: index `len` holds the segment's
+ * fixed start point, `len + 1` its live endpoint. */
+interface LineAnchor {
+  len: number
+  x: number
+  y: number
+  p: number
+}
+
+/** A path whose points span less than this on screen is a tap, committed as
+ * a single dot sized by pressure. */
+const DOT_MAX_SPAN_PX = 4
+
+/** Eraser reach in screen px — its world-space radius is this / zoom, so the
+ * circle drawn at the cursor always matches what a touch will erase. */
+const ERASER_RADIUS_PX = 10
 
 const HANDLES = ["nw", "n", "ne", "e", "se", "s", "sw", "w"] as const
 const HANDLE_SIZE = 9
@@ -189,6 +207,8 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
   const resizeStartedRef = useRef(false)
   const eraseDoneRef = useRef(false)
   const strokeSmootherRef = useRef<StrokeSmoother | null>(null)
+  const lineAnchorRef = useRef<LineAnchor | null>(null)
+  const pointerScreenRef = useRef<{ x: number; y: number } | null>(null)
 
   // Keep latest props in refs for event handlers
   const elementsRef = useRef(elements)
@@ -492,6 +512,20 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       ctx.fillRect(mx * cam.zoom + cam.x, my * cam.zoom + cam.y, Math.abs(m.w) * cam.zoom, Math.abs(m.h) * cam.zoom)
       ctx.strokeRect(mx * cam.zoom + cam.x, my * cam.zoom + cam.y, Math.abs(m.w) * cam.zoom, Math.abs(m.h) * cam.zoom)
     }
+
+    // Eraser cursor — light grey ring showing what a touch will erase.
+    if (toolRef.current === "eraser" && (modeRef.current === "idle" || modeRef.current === "erase")) {
+      const ptr = pointerScreenRef.current
+      if (ptr) {
+        ctx.beginPath()
+        ctx.arc(ptr.x, ptr.y, ERASER_RADIUS_PX, 0, Math.PI * 2)
+        ctx.fillStyle = "rgba(0,0,0,0.05)"
+        ctx.fill()
+        ctx.strokeStyle = "#c9c9c9"
+        ctx.lineWidth = 1
+        ctx.stroke()
+      }
+    }
   }, [invalidate])
 
   function handlePosition(x: number, y: number, w: number, h: number, handle: string) {
@@ -611,6 +645,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     if (modeRef.current !== "idle") return
     if (activePointerRef.current !== null) return // single active pointer
     const { screen, world } = pointerPos(e)
+    pointerScreenRef.current = screen
     const t = toolRef.current
 
     const wantPan = e.button === 1 || e.button === 2 || spaceRef.current || (e.pointerType === "touch" && e.isPrimary === false)
@@ -634,6 +669,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       case "pen": {
         const pressure = e.pointerType === "pen" ? e.pressure : 0.5
         strokeSmootherRef.current = new StrokeSmoother()
+        lineAnchorRef.current = null
         const smooth = strokeSmootherRef.current.add(screen.x, screen.y, pressure, e.nativeEvent.timeStamp)
         liveElementRef.current = {
           id: newId(),
@@ -737,25 +773,47 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
   }
 
   const eraseAt = (world: { x: number; y: number }) => {
-    const tol = 10 / cameraRef.current.zoom
-    const hitIds = new Set<string>()
+    const tol = ERASER_RADIUS_PX / cameraRef.current.zoom
+    const removedIds = new Set<string>()
+    // Freehand strokes cut partially; other types erase whole.
+    const split = new Map<string, PathElement[]>()
     for (const el of elementsRef.current) {
-      if (hitTest(el, world, tol)) hitIds.add(el.id)
-    }
-    if (hitIds.size > 0) {
-      // Take one history entry for the whole erase drag, on first contact.
-      if (!eraseDoneRef.current) {
-        onBeginAction()
-        eraseDoneRef.current = true
+      if (el.type === "path") {
+        if (!circleHitsBBox(world, tol, elementBBox(el))) continue
+        const pieces = eraseStroke(el, world, tol)
+        if (pieces.length !== 1 || pieces[0] !== el) split.set(el.id, pieces)
+      } else if (hitTest(el, world, tol)) {
+        removedIds.add(el.id)
       }
-      onElementsChange(withoutElements(elementsRef.current, hitIds))
     }
+    if (removedIds.size === 0 && split.size === 0) return
+    // Take one history entry for the whole erase drag, on first contact.
+    if (!eraseDoneRef.current) {
+      onBeginAction()
+      eraseDoneRef.current = true
+    }
+    // Fully-cut strokes disappear via their empty piece list; withoutElements
+    // also detaches children of any deleted container.
+    onElementsChange(
+      withoutElements(
+        elementsRef.current.flatMap((el) => split.get(el.id) ?? [el]),
+        removedIds,
+      ),
+    )
   }
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (modeRef.current === "idle") return
+    if (modeRef.current === "idle") {
+      // Hover: keep the eraser circle glued to the pointer.
+      if (toolRef.current === "eraser") {
+        pointerScreenRef.current = pointerPos(e).screen
+        invalidate()
+      }
+      return
+    }
     if (e.pointerId !== activePointerRef.current) return
     const { screen, world } = pointerPos(e)
+    pointerScreenRef.current = screen
     const start = dragStartRef.current
 
     switch (modeRef.current) {
@@ -775,19 +833,59 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
         const samples = events.length > 0 ? events : [e.nativeEvent as PointerEvent]
         const rect = canvasRef.current!.getBoundingClientRect()
         const cam = cameraRef.current
-        for (const ev of samples) {
-          // Filter in screen space (where device jitter lives), then convert.
-          const smooth = smoother.add(
-            ev.clientX - rect.left,
-            ev.clientY - rect.top,
-            ev.pointerType === "pen" ? ev.pressure : 0.5,
-            ev.timeStamp,
-          )
-          const wx = (smooth.x - cam.x) / cam.zoom
-          const wy = (smooth.y - cam.y) / cam.zoom
-          const last = live.points[live.points.length - 1]
-          if (last && Math.hypot(wx - last.x, wy - last.y) < 0.75 / cam.zoom) continue
-          live.points.push({ x: wx, y: wy, p: smooth.p })
+
+        if (e.ctrlKey || e.metaKey) {
+          // Ctrl: straight-line mode. The freehand tail collapses to one
+          // segment from its last committed point to the cursor; on release
+          // freehand resumes from there.
+          let anchor = lineAnchorRef.current
+          if (!anchor) {
+            const last = live.points[live.points.length - 1]
+            anchor = { len: live.points.length - 1, x: last.x, y: last.y, p: last.p }
+            lineAnchorRef.current = anchor
+          }
+          // Keep feeding the filter so pressure stays live and the handoff
+          // back to freehand is seamless.
+          let smooth: SmoothedSample | null = null
+          for (const ev of samples) {
+            smooth = smoother.add(
+              ev.clientX - rect.left,
+              ev.clientY - rect.top,
+              ev.pointerType === "pen" ? ev.pressure : 0.5,
+              ev.timeStamp,
+            )
+          }
+          if (smooth) {
+            let wx = (smooth.x - cam.x) / cam.zoom
+            let wy = (smooth.y - cam.y) / cam.zoom
+            if (e.shiftKey) {
+              // Shift: snap the segment to 45° increments, like the line tool.
+              const dx = wx - anchor.x
+              const dy = wy - anchor.y
+              const snap = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4)
+              const len = Math.hypot(dx, dy)
+              wx = anchor.x + Math.cos(snap) * len
+              wy = anchor.y + Math.sin(snap) * len
+            }
+            live.points.length = anchor.len + 2
+            live.points[anchor.len + 1] = { x: wx, y: wy, p: smooth.p }
+          }
+        } else {
+          lineAnchorRef.current = null
+          for (const ev of samples) {
+            // Filter in screen space (where device jitter lives), then convert.
+            const smooth = smoother.add(
+              ev.clientX - rect.left,
+              ev.clientY - rect.top,
+              ev.pointerType === "pen" ? ev.pressure : 0.5,
+              ev.timeStamp,
+            )
+            const wx = (smooth.x - cam.x) / cam.zoom
+            const wy = (smooth.y - cam.y) / cam.zoom
+            const last = live.points[live.points.length - 1]
+            if (last && Math.hypot(wx - last.x, wy - last.y) < 0.75 / cam.zoom) continue
+            live.points.push({ x: wx, y: wy, p: smooth.p })
+          }
         }
         invalidate()
         break
@@ -825,6 +923,8 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
       }
       case "erase": {
         eraseAt(world)
+        // Redraw even when nothing was cut so the circle tracks the pointer.
+        invalidate()
         break
       }
       case "move": {
@@ -873,6 +973,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
     activePointerRef.current = null
     panButtonRef.current = false
     strokeSmootherRef.current = null
+    lineAnchorRef.current = null
     try {
       canvasRef.current?.releasePointerCapture(e.pointerId)
     } catch {
@@ -891,8 +992,26 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
         if (live) {
           const b = elementBBox(live)
           const tooSmall = b.w < 2 && b.h < 2 && live.type !== "path"
-          const emptyPath = live.type === "path" && live.points.length < 2
-          if (!tooSmall && !emptyPath) {
+          if (live.type === "path" && live.points.length > 0) {
+            // A tap with barely any movement commits as a dot — pressure
+            // (pen) sets its size — so a clean click needs no wiggle.
+            let minX = Infinity
+            let minY = Infinity
+            let maxX = -Infinity
+            let maxY = -Infinity
+            for (const pt of live.points) {
+              if (pt.x < minX) minX = pt.x
+              if (pt.y < minY) minY = pt.y
+              if (pt.x > maxX) maxX = pt.x
+              if (pt.y > maxY) maxY = pt.y
+            }
+            if (Math.max(maxX - minX, maxY - minY) * cameraRef.current.zoom < DOT_MAX_SPAN_PX) {
+              let p = 0
+              for (const pt of live.points) p = Math.max(p, pt.p)
+              live.points = [{ ...live.points[0], p }]
+            }
+          }
+          if (!tooSmall) {
             // Freshly created objects become contained when fully inside one.
             onCommit((els) => [...els, withContainment(els, live)])
           }
@@ -939,6 +1058,12 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
         break
       }
     }
+  }
+
+  const onPointerLeave = () => {
+    if (!pointerScreenRef.current) return
+    pointerScreenRef.current = null
+    if (toolRef.current === "eraser") invalidate()
   }
 
   // ---------- Wheel: pan + zoom ----------
@@ -1047,6 +1172,7 @@ const BoardCanvas = forwardRef<CanvasHandle, Props>(function BoardCanvas(props, 
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onPointerLeave={onPointerLeave}
         onDoubleClick={onDoubleClick}
         onContextMenu={(e) => e.preventDefault()}
       />

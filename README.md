@@ -12,6 +12,9 @@ and survives browser/webview storage clears.
 
 - **Infinite canvas** with smooth pan and zoom.
 - **Drawing tools:** freehand pen (pressure-aware), rectangle, ellipse, line, and arrow.
+  Hold **Ctrl** mid-stroke to draw a straight line (Shift snaps to 45°), tap to
+  stamp a pressure-sized dot, and erase strokes partially — the eraser cuts and
+  splits freehand lines instead of deleting them whole.
 - **Post-it notes** with editable text, alignment, and adjustable font sizes.
 - **Images:** paste from the clipboard or drag-and-drop onto the canvas.
 - **Containers:** drop elements inside shapes/notes and move them together.

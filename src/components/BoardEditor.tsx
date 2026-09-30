@@ -49,9 +49,9 @@ import type { BoardElement, Camera, ImageElement, PostitElement, Tool } from "@/
 import { newId } from "@/lib/db"
 import type { BoardState } from "@/hooks/useBoard"
 
-const TOOLS: { id: Tool; label: string; icon: typeof Pencil; shortcut: string }[] = [
+const TOOLS: { id: Tool; label: string; icon: typeof Pencil; shortcut: string; hint?: string }[] = [
   { id: "select", label: "Select", icon: MousePointer2, shortcut: "V" },
-  { id: "pen", label: "Pen", icon: Pencil, shortcut: "P" },
+  { id: "pen", label: "Pen", icon: Pencil, shortcut: "P", hint: "hold Ctrl for straight lines" },
   { id: "eraser", label: "Eraser", icon: Eraser, shortcut: "E" },
   { id: "rect", label: "Rectangle", icon: Square, shortcut: "R" },
   { id: "ellipse", label: "Ellipse", icon: Circle, shortcut: "O" },
@@ -524,7 +524,7 @@ export default function BoardEditor({ state }: Props) {
         {/* Left toolbar */}
         <div className="absolute left-3 top-1/2 z-10 -translate-y-1/2">
           <div className="flex flex-col items-center gap-1 rounded-xl border border-neutral-200 bg-white/95 p-1.5 shadow-lg backdrop-blur">
-            {TOOLS.map(({ id, label, icon: Icon, shortcut }) => (
+            {TOOLS.map(({ id, label, icon: Icon, shortcut, hint }) => (
               <Tooltip key={id}>
                 <TooltipTrigger asChild>
                   <Button
@@ -538,7 +538,7 @@ export default function BoardEditor({ state }: Props) {
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="right">
-                  {label} ({shortcut})
+                  {label} ({shortcut}){hint ? ` — ${hint}` : ""}
                 </TooltipContent>
               </Tooltip>
             ))}

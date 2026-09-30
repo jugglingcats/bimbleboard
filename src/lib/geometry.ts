@@ -14,13 +14,17 @@ export function elementBBox(el: BoardElement): BBox {
       let minY = Infinity
       let maxX = -Infinity
       let maxY = -Infinity
+      let maxP = 0
       for (const pt of el.points) {
         if (pt.x < minX) minX = pt.x
         if (pt.y < minY) minY = pt.y
         if (pt.x > maxX) maxX = pt.x
         if (pt.y > maxY) maxY = pt.y
+        if (pt.p > maxP) maxP = pt.p
       }
-      const pad = el.strokeWidth / 2
+      // Pressure widens the rendered stroke (dots most visibly), so the box
+      // must reach the fattest half-width the points can produce.
+      const pad = (el.strokeWidth * (0.5 + maxP)) / 2
       return { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 }
     }
     case "rect":
@@ -61,7 +65,7 @@ export function boardsBBox(elements: BoardElement[]): BBox | null {
   return unionBBox(elements.map(elementBBox))
 }
 
-function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+export function distToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
   const dx = x2 - x1
   const dy = y2 - y1
   const lenSq = dx * dx + dy * dy
@@ -83,7 +87,7 @@ export function hitTest(el: BoardElement, pt: Point, tol: number): boolean {
       }
       if (el.points.length === 1) {
         const a = el.points[0]
-        return Math.hypot(pt.x - a.x, pt.y - a.y) <= tol + el.strokeWidth / 2
+        return Math.hypot(pt.x - a.x, pt.y - a.y) <= tol + (el.strokeWidth * (0.5 + a.p)) / 2
       }
       return false
     }
